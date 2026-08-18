@@ -32,6 +32,14 @@ spec:
           type: boolean
           jsonPath: .spec.exclusive
           priority: 1
+        - name: Scheduled For
+          type: string
+          jsonPath: .spec.scheduledStartTime
+          priority: 1
+        - name: Schedule
+          type: string
+          jsonPath: .spec.schedule
+          priority: 1
         - name: Phase
           type: string
           jsonPath: .status.phase
@@ -136,6 +144,23 @@ spec:
                     stays Admitted indefinitely until deleted.
                 priority:
                   type: string
+                scheduledStartTime:
+                  type: string
+                  format: date-time
+                  description: >-
+                    If set, the job stays in Scheduled phase until this
+                    UTC timestamp is reached, then proceeds to Resolving.
+                    ISO 8601 format (e.g. "2026-08-18T15:00:00Z").
+                    When omitted the job starts immediately.
+                    Mutually exclusive with 'schedule'.
+                schedule:
+                  type: string
+                  description: >-
+                    Cron expression for recurring execution (e.g.
+                    "0 20 * * *" for every day at 20:00 UTC). When set,
+                    this job acts as a template in Recurring phase and
+                    the operator creates child FournosJob CRs on each
+                    cron tick. Mutually exclusive with 'scheduledStartTime'.
                 shutdown:
                   type: string
                   enum:
@@ -153,6 +178,8 @@ spec:
                 phase:
                   type: string
                   enum:
+                    - Scheduled
+                    - Recurring
                     - Resolving
                     - Pending
                     - Admitted
@@ -169,6 +196,12 @@ spec:
                   type: string
                 message:
                   type: string
+                lastScheduledTime:
+                  type: string
+                  format: date-time
+                  description: >-
+                    For recurring jobs, the timestamp when the last child
+                    job was created. Used to determine the next cron tick.
                 engineStatus:
                   type: object
                   description: >-

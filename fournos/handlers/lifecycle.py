@@ -1,19 +1,26 @@
-"""Lifecycle handlers — on_create and reconcile_pending.
+"""Lifecycle handlers — on_create, reconcile_scheduled, reconcile_recurring,
+and reconcile_pending.
 
-Covers the early phases of a FournosJob: creation and pending admission
+Covers the early phases of a FournosJob: creation, optional deferred
+scheduling, recurring cron-based scheduling, and pending admission
 through Kueue.  Exclusive locking is handled entirely by Kueue via
 cluster-slot resources.
 """
 
 from __future__ import annotations
 
+import copy
 import logging
+from datetime import UTC, datetime
 
+from croniter import croniter
 from kubernetes import client as k8s_client
 
 from fournos.core.constants import (
+    ANNOTATION_TRIGGER_NOW,
     CLUSTER_SLOT_RESOURCE,
     LABEL_EXCLUSIVE_CLUSTER,
+    LABEL_RECURRING_PARENT,
     LOCK_HOLDING_PHASES,
     Phase,
 )
@@ -46,6 +53,37 @@ def on_create(spec, name, namespace, status, patch, body):
         patch.status["phase"] = Phase.STOPPED
         patch.status["message"] = "Job stopped by user"
         logger.info("Job %s: created with shutdown=%s, skipping", name, shutdown)
+        return
+
+    cron_expr = spec.get("schedule")
+    scheduled_time = _parse_scheduled_time(spec)
+
+    if isinstance(scheduled_time, str):
+        patch.status["phase"] = Phase.FAILED
+        patch.status["message"] = scheduled_time
+        return
+
+    if cron_expr and scheduled_time is not None:
+        patch.status["phase"] = Phase.FAILED
+        patch.status["message"] = (
+            "'schedule' and 'scheduledStartTime' are mutually exclusive"
+        )
+        return
+
+    if cron_expr:
+        if not croniter.is_valid(cron_expr):
+            patch.status["phase"] = Phase.FAILED
+            patch.status["message"] = f"Invalid cron expression: {cron_expr}"
+            return
+        patch.status["phase"] = Phase.RECURRING
+        patch.status["message"] = f"Recurring schedule: {cron_expr}"
+        logger.info("Job %s: phase=Recurring, schedule=%s", name, cron_expr)
+        return
+
+    if scheduled_time is not None and datetime.now(UTC) < scheduled_time:
+        patch.status["phase"] = Phase.SCHEDULED
+        patch.status["message"] = f"Scheduled to start at {scheduled_time.isoformat()}"
+        logger.info("Job %s: phase=Scheduled, startTime=%s", name, scheduled_time)
         return
 
     cluster = spec.get("cluster")
@@ -109,6 +147,132 @@ def on_create(spec, name, namespace, status, patch, body):
     patch.status["phase"] = Phase.RESOLVING
     patch.status["message"] = "Resolving job requirements"
     logger.info("Job %s: phase=Resolving", name)
+
+
+# ---------------------------------------------------------------------------
+# HELPERS
+# ---------------------------------------------------------------------------
+
+
+def _parse_scheduled_time(spec) -> datetime | str | None:
+    """Return the parsed scheduledStartTime, None if absent, or an error string if invalid."""
+    raw = spec.get("scheduledStartTime")
+    if raw is None:
+        return None
+    try:
+        ts = datetime.fromisoformat(raw)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        return ts
+    except (ValueError, TypeError):
+        return f"Invalid scheduledStartTime: {raw!r}"
+
+
+# ---------------------------------------------------------------------------
+# SCHEDULED — wait until scheduledStartTime is reached
+# ---------------------------------------------------------------------------
+
+
+def reconcile_scheduled(spec, name, namespace, status, patch, body):
+    """Transition from Scheduled to the normal on_create flow once the time is reached."""
+    scheduled_time = _parse_scheduled_time(spec)
+    if isinstance(scheduled_time, str):
+        patch.status["phase"] = Phase.FAILED
+        patch.status["message"] = scheduled_time
+        return
+    if isinstance(scheduled_time, datetime) and datetime.now(UTC) < scheduled_time:
+        return
+
+    logger.info("Job %s: scheduled time reached, starting job", name)
+    on_create(spec, name, namespace, {}, patch, body)
+
+
+# ---------------------------------------------------------------------------
+# RECURRING — create child FournosJobs on each cron tick
+# ---------------------------------------------------------------------------
+
+
+def reconcile_recurring(spec, name, namespace, status, patch, body):
+    """Create a child FournosJob when the next cron tick is reached or trigger-now is set."""
+    cron_expr = spec.get("schedule")
+    if not cron_expr:
+        return
+
+    now = datetime.now(UTC)
+    annotations = body.get("metadata", {}).get("annotations") or {}
+    trigger_now = annotations.get(ANNOTATION_TRIGGER_NOW, "").lower() == "true"
+
+    if not trigger_now:
+        creation_time = datetime.fromisoformat(body["metadata"]["creationTimestamp"])
+
+        last_raw = status.get("lastScheduledTime")
+        if last_raw:
+            try:
+                base_time = datetime.fromisoformat(last_raw)
+                if base_time.tzinfo is None:
+                    base_time = base_time.replace(tzinfo=UTC)
+            except (ValueError, TypeError):
+                logger.warning(
+                    "Job %s: corrupt lastScheduledTime %r, falling back to creationTimestamp",
+                    name,
+                    last_raw,
+                )
+                base_time = creation_time
+        else:
+            base_time = creation_time
+
+        next_time = croniter(cron_expr, base_time).get_next(datetime)
+        if next_time.tzinfo is None:
+            next_time = next_time.replace(tzinfo=UTC)
+
+        if now < next_time:
+            return
+
+    child_spec = copy.deepcopy(dict(spec))
+    child_spec.pop("schedule", None)
+    child_spec.pop("scheduledStartTime", None)
+
+    safe_name = name[:58].rstrip("-")
+    child_body = {
+        "apiVersion": f"{CRD_GROUP}/{CRD_VERSION}",
+        "kind": "FournosJob",
+        "metadata": {
+            "generateName": f"{safe_name}-",
+            "namespace": namespace,
+            "labels": {
+                LABEL_RECURRING_PARENT: name,
+            },
+        },
+        "spec": child_spec,
+    }
+
+    custom = k8s_client.CustomObjectsApi()
+    try:
+        created = custom.create_namespaced_custom_object(
+            CRD_GROUP,
+            CRD_VERSION,
+            namespace,
+            "fournosjobs",
+            child_body,
+        )
+        child_name = created["metadata"]["name"]
+        patch.status["lastScheduledTime"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        patch.status["message"] = (
+            f"Recurring schedule: {cron_expr} (last child: {child_name})"
+        )
+        if trigger_now:
+            patch.meta.setdefault("annotations", {})[ANNOTATION_TRIGGER_NOW] = "false"
+            logger.info("Job %s: trigger-now created child %s", name, child_name)
+        else:
+            logger.info(
+                "Job %s: created recurring child %s (next after %s)",
+                name,
+                child_name,
+                next_time.isoformat(),
+            )
+    except k8s_client.exceptions.ApiException as exc:
+        logger.error("Job %s: failed to create recurring child: %s", name, exc.reason)
+        patch.status["message"] = f"Failed to create child job: {exc.reason}"
 
 
 def _create_lock_workload(spec, name, patch, body):

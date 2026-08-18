@@ -6,7 +6,12 @@ from .execution import (
     reconcile_running,
     reconcile_stopping,
 )
-from .lifecycle import on_create, reconcile_pending
+from .lifecycle import (
+    on_create,
+    reconcile_pending,
+    reconcile_recurring,
+    reconcile_scheduled,
+)
 from .resolving import reconcile_resolving
 
 __all__ = [
@@ -14,7 +19,9 @@ __all__ = [
     "on_create",
     "reconcile_admitted",
     "reconcile_pending",
+    "reconcile_recurring",
     "reconcile_resolving",
     "reconcile_running",
+    "reconcile_scheduled",
     "reconcile_stopping",
 ]
