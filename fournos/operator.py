@@ -93,6 +93,8 @@ def on_create(spec, name, namespace, status, patch, body, **_):
     when=lambda status, **_: (
         status.get("phase")
         in (
+            Phase.SCHEDULED,
+            Phase.RECURRING,
             Phase.RESOLVING,
             Phase.PENDING,
             Phase.ADMITTED,
@@ -113,7 +115,11 @@ def reconcile(spec, name, namespace, status, patch, body, **_):
         handlers.handle_shutdown(name, status, patch, shutdown)
         return
 
-    if phase == Phase.RESOLVING:
+    if phase == Phase.SCHEDULED:
+        handlers.reconcile_scheduled(spec, name, namespace, status, patch, body)
+    elif phase == Phase.RECURRING:
+        handlers.reconcile_recurring(spec, name, namespace, status, patch, body)
+    elif phase == Phase.RESOLVING:
         handlers.reconcile_resolving(spec, name, status, patch, body)
     elif phase == Phase.PENDING:
         handlers.reconcile_pending(spec, name, status, patch, body)

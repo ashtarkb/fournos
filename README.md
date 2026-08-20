@@ -88,6 +88,8 @@ oc delete FournosJob -n $FOURNOS_WORKLOAD_NAMESPACE <name>      # cleanup
 | `spec.secretRefs` | no | Vault-synced K8s Secret names (prefixed with `vault-`) to mount into the pipeline. Populated by the execution engine during the Resolving phase. The operator validates each name in `FOURNOS_SECRETS_NAMESPACE`, copies the secrets into the operator namespace, and mounts them as a projected volume at `/var/run/secrets/fournos/<entry-name>/`. |
 | `spec.exclusive` | no (default `true`) | If `true`, locks the target cluster so no other FournosJob can run there. Requires `spec.cluster`. Hardware is optional — when omitted the Workload only requests cluster-slot resources for locking. |
 | `spec.clusterless` | no (default `false`) | If `true`, runs without cluster access — no kubeconfig is passed to the execution environment. Cannot be combined with `cluster` or `exclusive: true`. Hardware specifications are optional — if omitted, the job runs on hub cluster resources without Kueue hardware scheduling. |
+| `spec.scheduledStartTime` | no | ISO 8601 UTC timestamp (e.g. `2026-08-18T15:00:00Z`). When set, the job stays in `Scheduled` phase until this time, then proceeds to `Resolving`. Mutually exclusive with `schedule`. |
+| `spec.schedule` | no | Cron expression for recurring execution (e.g. `0 20 * * *`). The job enters `Recurring` phase and the operator creates child FournosJob CRs on each cron tick, labeled with `fournos.dev/recurring-parent`. Mutually exclusive with `scheduledStartTime`. |
 | `spec.shutdown` | no | Shutdown action: `Stop` cancels gracefully (Tekton `CancelledRunFinally` — runs `finally` tasks); `Terminate` cancels immediately (Tekton `Cancelled` — skips `finally` tasks). Both wait for the PipelineRun to finish before releasing Kueue quota. |
 
 \* `spec.hardware` is optional for all jobs except those requiring explicit GPU 
@@ -111,7 +113,8 @@ The operator writes status to `.status`:
 
 | Field | Description |
 |---|---|
-| `phase` | `Resolving` → `Pending` → `Admitted` → `Running` → `Succeeded` / `Failed` / `Stopping` → `Stopped` |
+| `phase` | [`Scheduled` →] [`Recurring` ↻] `Resolving` → `Pending` → `Admitted` → `Running` → `Succeeded` / `Failed` / `Stopping` → `Stopped` |
+| `lastScheduledTime` | For recurring jobs, the timestamp when the last child job was created |
 | `cluster` | Cluster assigned by Kueue (or `[clusterless]` for clusterless jobs) |
 | `pipelineRun` | Name of the Tekton PipelineRun |
 | `dashboardURL` | Tekton Dashboard link (if configured) |
@@ -158,6 +161,73 @@ Resolving → Admitted → Running → Succeeded/Failed
 - Must use `exclusive: false`
 - Cannot use `lockOnly: true`
 - No target cluster kubeconfig available to execution environment
+
+## Scheduled and Recurring Jobs
+
+### One-time scheduled jobs
+
+Set `spec.scheduledStartTime` to defer execution to a future time. The job
+enters `Scheduled` phase and automatically transitions to `Resolving` once the
+time is reached. When `scheduledStartTime` is omitted or in the past, the job
+starts immediately.
+
+```yaml
+apiVersion: fournos.dev/v1
+kind: FournosJob
+metadata:
+  generateName: deferred-bench-
+spec:
+  owner: perf-team
+  scheduledStartTime: "2026-08-18T15:00:00Z"
+  cluster: cluster-1
+  executionEngine:
+    forge:
+      project: llm-d
+      args: [cks]
+```
+
+**Lifecycle:** `Scheduled` → `Resolving` → `Pending` → `Admitted` → `Running` → `Succeeded`/`Failed`
+
+### Recurring jobs
+
+Set `spec.schedule` with a cron expression to create a recurring job template.
+The job enters `Recurring` phase and the operator creates child FournosJob CRs
+on each cron tick. The parent stays in `Recurring` phase indefinitely.
+
+```yaml
+apiVersion: fournos.dev/v1
+kind: FournosJob
+metadata:
+  name: nightly-bench
+spec:
+  owner: perf-team
+  schedule: "0 20 * * *"
+  cluster: cluster-1
+  executionEngine:
+    forge:
+      project: llm-d
+      args: [cks]
+```
+
+Child jobs are labeled with `fournos.dev/recurring-parent` for easy querying:
+
+```bash
+kubectl get fjobs -l fournos.dev/recurring-parent=nightly-bench
+```
+
+To manually trigger a child job outside the cron schedule:
+
+```bash
+kubectl annotate fjob nightly-bench fournos.dev/trigger-now=true
+```
+
+The operator creates a child immediately and resets the annotation to `false`.
+
+To stop recurring execution, delete the parent job.
+
+**Restrictions:**
+- `scheduledStartTime` and `schedule` are mutually exclusive
+- Invalid cron expressions or timestamps fail the job immediately
 
 ## Local development
 

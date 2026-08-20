@@ -55,6 +55,8 @@ Jobs are submitted as `FournosJob` custom resources ([manifests/crd.yaml](manife
 | `spec.priority`              | no           | Kueue WorkloadPriorityClass name                                                                 |
 | `spec.secretRefs`            | no           | Vault-synced K8s Secret names (`vault-<entry>`) to mount into the pipeline. Populated by the execution engine during the Resolving phase. Each must be a K8s Secret with `fournos.dev/vault-entry=true` in `FOURNOS_SECRETS_NAMESPACE`. During the Admitted phase the operator copies them into the operator namespace and mounts them as a projected volume at `/var/run/secrets/fournos/<entry-name>/`. |
 | `spec.exclusive`             | no (default `true`) | If `true`, locks the target cluster so no other FournosJob can run there. Requires `spec.cluster`. Hardware is optional — when omitted the Workload only requests cluster-slot resources for locking. |
+| `spec.scheduledStartTime`    | no           | ISO 8601 UTC timestamp. When set, the job stays in `Scheduled` phase until this time, then proceeds to `Resolving`. Mutually exclusive with `schedule`. |
+| `spec.schedule`              | no           | Cron expression for recurring execution (e.g. `0 20 * * *`). The job enters `Recurring` phase and creates child FournosJobs on each cron tick, labeled with `fournos.dev/recurring-parent`. Mutually exclusive with `scheduledStartTime`. |
 | `spec.shutdown`              | no           | Shutdown action: `Stop` (graceful, runs finally tasks) or `Terminate` (immediate, skips finally tasks). Both wait for the PipelineRun to finish before releasing Kueue quota. |
 
 
@@ -69,11 +71,12 @@ The operator writes status to `.status`:
 
 | Field          | Description                                                 |
 | -------------- | ----------------------------------------------------------- |
-| `phase`        | `Resolving` → `Pending` → `Admitted` → `Running` → `Succeeded` / `Failed` / `Stopping` → `Stopped` |
+| `phase`        | [`Scheduled` →] [`Recurring` ↻] `Resolving` → `Pending` → `Admitted` → `Running` → `Succeeded` / `Failed` / `Stopping` → `Stopped` |
 | `cluster`      | Cluster assigned by Kueue                                   |
 | `pipelineRun`  | Name of the Tekton PipelineRun                              |
 | `dashboardURL` | Tekton Dashboard link (if configured)                       |
 | `message`      | Error details on failure                                    |
+| `lastScheduledTime` | For recurring jobs, the timestamp when the last child job was created |
 
 
 ### Example
@@ -140,6 +143,18 @@ Clusterless jobs (`clusterless: true`) bypass Kueue entirely and run on the hub 
 - Must use `exclusive: false`
 - Cannot use `lockOnly: true`
 - No kubeconfig passed to execution environment
+
+### Scheduled and recurring jobs
+
+The operator supports two forms of deferred execution, both configured at the CRD level:
+
+**One-time scheduled jobs** (`spec.scheduledStartTime`): The job enters `Scheduled` phase and waits until the specified ISO 8601 timestamp. When the time is reached, the operator resets the status and proceeds to the normal `Resolving` → `Pending` → `Admitted` → `Running` flow. If the timestamp is invalid, the job immediately transitions to `Failed`.
+
+**Recurring jobs** (`spec.schedule`): The job enters `Recurring` phase and acts as a template. On each cron tick (parsed by [`croniter`](https://github.com/kiorky/croniter)), the operator deep-copies the parent spec (stripping `schedule` and `scheduledStartTime`), creates a child FournosJob CR with `generateName`, and labels it with `fournos.dev/recurring-parent: <parent-name>`. The parent's `status.lastScheduledTime` tracks the last trigger. If the cron expression is invalid, the job immediately transitions to `Failed`.
+
+A manual trigger is supported via the `fournos.dev/trigger-now` annotation — setting it to `"true"` creates a child job immediately and resets the annotation to `"false"`.
+
+The two fields are mutually exclusive — setting both results in validation failure.
 
 ### Exclusive cluster locking
 
@@ -211,7 +226,9 @@ sequenceDiagram
 
 
 
-1. **on_create**: Operator validates the spec (cluster exists if specified, `exclusive` requires `cluster` — and `exclusive` defaults to `true`). If `spec.shutdown` is set (`Stop` or `Terminate`), immediately sets `phase=Stopped`. Otherwise sets `phase=Resolving`.
+1. **on_create**: Operator validates the spec (cluster exists if specified, `exclusive` requires `cluster` — and `exclusive` defaults to `true`). If `spec.scheduledStartTime` and `spec.schedule` are both set, fails immediately. If `spec.schedule` is set with a valid cron expression, sets `phase=Recurring`. If `spec.scheduledStartTime` is set and in the future, sets `phase=Scheduled`. If `spec.shutdown` is set (`Stop` or `Terminate`), immediately sets `phase=Stopped`. Otherwise sets `phase=Resolving`.
+1a. **timer (Scheduled)**: Waits until `scheduledStartTime` is reached, then resets the status and re-enters the `on_create` flow (which sets `phase=Resolving`). If `scheduledStartTime` is unparseable, sets `phase=Failed`.
+1b. **timer (Recurring)**: On each cron tick (or when `fournos.dev/trigger-now` annotation is `"true"`), deep-copies the parent spec (stripping `schedule`/`scheduledStartTime`), creates a child FournosJob with `generateName`, labels it with `fournos.dev/recurring-parent`, and updates `status.lastScheduledTime`.
 2. **timer (Resolving)**: Reads the `fournos.dev/resolve-image` annotation from the Tekton Pipeline referenced by `spec.pipeline` and launches a resolve K8s Job using that image. The resolve Job patches the FournosJob spec with `hardware` (if not user-provided) and `secretRefs`. Polls the Job for completion. On success, reads the FournosJob spec, validates hardware (GPU type checked against Kueue; hardware is optional for exclusive+cluster jobs), validates `secretRefs` against Vault secrets, creates the Kueue Workload (exclusive jobs request all 100 `fournos/cluster-slot` units; non-exclusive jobs request 1), and sets `phase=Pending`. Failed resolve Jobs are preserved for debugging.
 3. **timer (Pending)**: Polls the Workload for Kueue admission. On admission, extracts the assigned cluster and sets `phase=Admitted`.
 4. **timer (Admitted)**: Reads `secretRefs` from the FournosJob spec, copies each referenced secret from `secrets_namespace` into the operator namespace (per-job name `<fjob-name>-<ref>`, with `ownerReferences` for automatic cleanup), resolves the kubeconfig Secret, creates the Tekton PipelineRun with `FJOB_NAME` + `FOURNOS_WORKLOAD_NAMESPACE` params (so the execution engine can look up the full spec), a projected `vault-secrets` volume mounting all copied secrets at `/var/run/secrets/fournos/<entry-name>/`, and `ownerReferences` pointing at the FournosJob, sets `phase=Running`.
