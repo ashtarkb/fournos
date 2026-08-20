@@ -36,7 +36,6 @@ def _spec(**overrides) -> dict:
     base = {
         "clusterless": True,
         "exclusive": False,
-        "pipeline": "forge-test-only",
         "executionEngine": {
             "forge": {
                 "project": "skeleton",
