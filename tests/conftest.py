@@ -44,9 +44,8 @@ def k8s():
     return client.CustomObjectsApi()
 
 
-@pytest.fixture(autouse=True)
-def _clean_before_test(k8s):
-    """Wipe all FournosJobs (and their child resources) for a deterministic state."""
+def _wipe_all_jobs(k8s) -> None:
+    """Delete all FournosJobs and wait for them to be gone."""
     jobs = k8s.list_namespaced_custom_object(GROUP, VERSION, NAMESPACE, PLURAL)
     for job in jobs.get("items", []):
         name = job["metadata"]["name"]
@@ -73,6 +72,14 @@ def _clean_before_test(k8s):
     _kubectl_delete_all("pipelineruns.tekton.dev")
     _kubectl_delete_all("workloads.kueue.x-k8s.io")
     _kubectl_delete_all("jobs.batch")
+
+
+@pytest.fixture(autouse=True)
+def _clean_around_test(k8s):
+    """Wipe all FournosJobs (and their child resources) before and after each test."""
+    _wipe_all_jobs(k8s)
+    yield
+    _wipe_all_jobs(k8s)
 
 
 # ---------------------------------------------------------------------------
