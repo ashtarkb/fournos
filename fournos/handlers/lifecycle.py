@@ -56,11 +56,11 @@ def on_create(spec, name, namespace, status, patch, body):
         return
 
     cron_expr = spec.get("schedule")
-    scheduled_time = _parse_scheduled_time(spec)
-
-    if isinstance(scheduled_time, str):
+    try:
+        scheduled_time = _parse_scheduled_time(spec)
+    except ValueError as exc:
         patch.status["phase"] = Phase.FAILED
-        patch.status["message"] = scheduled_time
+        patch.status["message"] = str(exc)
         return
 
     if cron_expr and scheduled_time is not None:
@@ -96,14 +96,16 @@ def on_create(spec, name, namespace, status, patch, body):
         patch.status["message"] = "lockOnly: true requires 'cluster' to be set"
         return
 
-    lock_until = parse_iso_timestamp(spec, "lockUntil")
     if spec.get("lockUntil") and not lock_only:
         patch.status["phase"] = Phase.FAILED
         patch.status["message"] = "lockUntil requires lockOnly: true"
         return
-    if isinstance(lock_until, str):
+
+    try:
+        parse_iso_timestamp(spec.get("lockUntil"), "lockUntil")
+    except ValueError as exc:
         patch.status["phase"] = Phase.FAILED
-        patch.status["message"] = lock_until
+        patch.status["message"] = str(exc)
         return
 
     if not lock_only and not spec.get("executionEngine"):
@@ -164,23 +166,26 @@ def on_create(spec, name, namespace, status, patch, body):
 # ---------------------------------------------------------------------------
 
 
-def parse_iso_timestamp(spec, field: str) -> datetime | str | None:
-    """Return the parsed *field* value, None if absent, or an error string if invalid."""
-    raw = spec.get(field)
+def parse_iso_timestamp(raw: str | None, field: str) -> datetime | None:
+    """Parse *raw* as an ISO 8601 timestamp, defaulting to UTC if tz-naive.
+
+    Returns None if *raw* is None. Raises ValueError, naming *field*, if
+    *raw* is not a valid ISO 8601 timestamp.
+    """
     if raw is None:
         return None
     try:
         ts = datetime.fromisoformat(raw)
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=UTC)
-        return ts
-    except (ValueError, TypeError):
-        return f"Invalid {field}: {raw!r}"
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"Invalid {field}: {raw!r}") from exc
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
+    return ts
 
 
-def _parse_scheduled_time(spec) -> datetime | str | None:
-    """Return the parsed scheduledStartTime, None if absent, or an error string if invalid."""
-    return parse_iso_timestamp(spec, "scheduledStartTime")
+def _parse_scheduled_time(spec) -> datetime | None:
+    """Return the parsed scheduledStartTime, or None if absent. Raises ValueError if invalid."""
+    return parse_iso_timestamp(spec.get("scheduledStartTime"), "scheduledStartTime")
 
 
 # ---------------------------------------------------------------------------
@@ -190,12 +195,13 @@ def _parse_scheduled_time(spec) -> datetime | str | None:
 
 def reconcile_scheduled(spec, name, namespace, status, patch, body):
     """Transition from Scheduled to the normal on_create flow once the time is reached."""
-    scheduled_time = _parse_scheduled_time(spec)
-    if isinstance(scheduled_time, str):
+    try:
+        scheduled_time = _parse_scheduled_time(spec)
+    except ValueError as exc:
         patch.status["phase"] = Phase.FAILED
-        patch.status["message"] = scheduled_time
+        patch.status["message"] = str(exc)
         return
-    if isinstance(scheduled_time, datetime) and datetime.now(UTC) < scheduled_time:
+    if scheduled_time is not None and datetime.now(UTC) < scheduled_time:
         return
 
     logger.info("Job %s: scheduled time reached, starting job", name)

@@ -145,8 +145,15 @@ def _finish_stop(name, conditions, patch, pr_message):
 
 def reconcile_admitted(spec, name, namespace, status, patch, body):
     if spec.get("lockOnly", False):
-        lock_until = parse_iso_timestamp(spec, "lockUntil")
-        if isinstance(lock_until, datetime) and datetime.now(UTC) >= lock_until:
+        # lockUntil was already validated in on_create, so a parse failure
+        # here shouldn't happen; treat it as "no deadline" rather than crash
+        # the reconcile loop.
+        try:
+            lock_until = parse_iso_timestamp(spec.get("lockUntil"), "lockUntil")
+        except ValueError:
+            logger.warning("Job %s: unexpected invalid lockUntil in spec", name)
+            lock_until = None
+        if lock_until is not None and datetime.now(UTC) >= lock_until:
             logger.info("Job %s: lockUntil reached (%s), releasing", name, lock_until)
             handle_shutdown(name, status, patch, Shutdown.TERMINATE)
             return

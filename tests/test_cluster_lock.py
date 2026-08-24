@@ -127,3 +127,59 @@ def test_lock_without_lock_until_holds_indefinitely(k8s):
     assert phase == Phase.ADMITTED, (
         f"Lock without lockUntil should still be held, got phase={phase!r}"
     )
+
+
+def test_lock_until_already_past_self_releases_quickly(k8s):
+    """A lockOnly job created with a lockUntil already in the past is admitted
+    and then released on the very next reconcile tick, rather than being
+    rejected outright at creation time.
+    """
+    create_job(
+        k8s,
+        "test-lock-past-ttl",
+        {
+            "cluster": "cluster-2",
+            "exclusive": True,
+            "lockOnly": True,
+            "lockUntil": _future(-3600),
+        },
+    )
+
+    phase = poll_phase(
+        k8s,
+        "test-lock-past-ttl",
+        terminal={Phase.STOPPED, Phase.FAILED},
+        timeout=30,
+    )
+    assert phase == Phase.STOPPED, job_status_summary(k8s, "test-lock-past-ttl")
+    assert not workload_exists("test-lock-past-ttl"), (
+        "Lock Workload should be deleted once the (already-past) lockUntil is reached"
+    )
+
+
+def test_lock_until_valid_format_but_naive_datetime_treated_as_utc(k8s):
+    """A lockUntil without an explicit 'Z'/offset is treated as UTC (same
+    convention as scheduledStartTime), not rejected and not interpreted in
+    local time.
+    """
+    naive_past = (datetime.now(UTC) - timedelta(hours=1)).strftime(
+        "%Y-%m-%dT%H:%M:%S"
+    )
+    create_job(
+        k8s,
+        "test-lock-naive-ttl",
+        {
+            "cluster": "cluster-3",
+            "exclusive": True,
+            "lockOnly": True,
+            "lockUntil": naive_past,
+        },
+    )
+
+    phase = poll_phase(
+        k8s,
+        "test-lock-naive-ttl",
+        terminal={Phase.STOPPED, Phase.FAILED},
+        timeout=30,
+    )
+    assert phase == Phase.STOPPED, job_status_summary(k8s, "test-lock-naive-ttl")
