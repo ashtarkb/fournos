@@ -162,9 +162,7 @@ def test_lock_until_valid_format_but_naive_datetime_treated_as_utc(k8s):
     convention as scheduledStartTime), not rejected and not interpreted in
     local time.
     """
-    naive_past = (datetime.now(UTC) - timedelta(hours=1)).strftime(
-        "%Y-%m-%dT%H:%M:%S"
-    )
+    naive_past = (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
     create_job(
         k8s,
         "test-lock-naive-ttl",
