@@ -96,6 +96,16 @@ def on_create(spec, name, namespace, status, patch, body):
         patch.status["message"] = "lockOnly: true requires 'cluster' to be set"
         return
 
+    lock_until = parse_iso_timestamp(spec, "lockUntil")
+    if spec.get("lockUntil") and not lock_only:
+        patch.status["phase"] = Phase.FAILED
+        patch.status["message"] = "lockUntil requires lockOnly: true"
+        return
+    if isinstance(lock_until, str):
+        patch.status["phase"] = Phase.FAILED
+        patch.status["message"] = lock_until
+        return
+
     if not lock_only and not spec.get("executionEngine"):
         patch.status["phase"] = Phase.FAILED
         patch.status["message"] = (
@@ -154,9 +164,9 @@ def on_create(spec, name, namespace, status, patch, body):
 # ---------------------------------------------------------------------------
 
 
-def _parse_scheduled_time(spec) -> datetime | str | None:
-    """Return the parsed scheduledStartTime, None if absent, or an error string if invalid."""
-    raw = spec.get("scheduledStartTime")
+def parse_iso_timestamp(spec, field: str) -> datetime | str | None:
+    """Return the parsed *field* value, None if absent, or an error string if invalid."""
+    raw = spec.get(field)
     if raw is None:
         return None
     try:
@@ -165,7 +175,12 @@ def _parse_scheduled_time(spec) -> datetime | str | None:
             ts = ts.replace(tzinfo=UTC)
         return ts
     except (ValueError, TypeError):
-        return f"Invalid scheduledStartTime: {raw!r}"
+        return f"Invalid {field}: {raw!r}"
+
+
+def _parse_scheduled_time(spec) -> datetime | str | None:
+    """Return the parsed scheduledStartTime, None if absent, or an error string if invalid."""
+    return parse_iso_timestamp(spec, "scheduledStartTime")
 
 
 # ---------------------------------------------------------------------------

@@ -40,6 +40,10 @@ spec:
           type: string
           jsonPath: .spec.schedule
           priority: 1
+        - name: Locked Until
+          type: string
+          jsonPath: .spec.lockUntil
+          priority: 1
         - name: Phase
           type: string
           jsonPath: .status.phase
@@ -141,7 +145,17 @@ spec:
                     implement human-driven cluster ownership. Implies
                     exclusive: true and requires 'cluster'. Skips execution
                     engine resolution and PipelineRun creation — the job
-                    stays Admitted indefinitely until deleted.
+                    stays Admitted until deleted, or until lockUntil is
+                    reached if set.
+                lockUntil:
+                  type: string
+                  format: date-time
+                  description: >-
+                    Only used with lockOnly: true. If set, the lock is
+                    released automatically once this UTC timestamp is
+                    reached. ISO 8601 format (e.g. "2026-08-23T18:00:00Z").
+                    When omitted the lock is held indefinitely until the
+                    job is deleted or shut down.
                 priority:
                   type: string
                 scheduledStartTime:

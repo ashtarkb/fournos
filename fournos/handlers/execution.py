@@ -7,6 +7,7 @@ the Tekton PipelineRun.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 
 from kubernetes import client
 
@@ -15,6 +16,7 @@ from fournos.core.tekton import TektonClient
 from fournos.settings import settings
 from fournos.state import ctx
 
+from .lifecycle import parse_iso_timestamp
 from .status import (
     COND_PIPELINE_RUN_READY,
     COND_WORKLOAD_ADMITTED,
@@ -143,6 +145,12 @@ def _finish_stop(name, conditions, patch, pr_message):
 
 def reconcile_admitted(spec, name, namespace, status, patch, body):
     if spec.get("lockOnly", False):
+        lock_until = parse_iso_timestamp(spec, "lockUntil")
+        if isinstance(lock_until, datetime) and datetime.now(UTC) >= lock_until:
+            logger.info("Job %s: lockUntil reached (%s), releasing", name, lock_until)
+            handle_shutdown(name, status, patch, Shutdown.TERMINATE)
+            return
+
         cluster = status.get("cluster", spec.get("cluster", ""))
         new_msg = f"Cluster lock held on {cluster}"
         if status.get("message") != new_msg:
