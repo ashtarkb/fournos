@@ -8,8 +8,8 @@ path as a user-triggered shutdown) once that time passes.
 
 from datetime import UTC, datetime, timedelta
 
-from kubernetes.client.exceptions import ApiException
 import pytest
+from kubernetes.client.exceptions import ApiException
 
 from fournos.core.constants import Phase
 from tests.conftest import (
