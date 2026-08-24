@@ -88,7 +88,7 @@ def on_create(spec, name, namespace, status, patch, body):
 
     cluster = spec.get("cluster")
     exclusive = spec["exclusive"]
-    lock_only = spec.get("lockOnly", False)
+    lock_only = is_lock_only(spec)
     clusterless = spec.get("clusterless", False)
 
     if lock_only and not cluster:
@@ -97,8 +97,10 @@ def on_create(spec, name, namespace, status, patch, body):
         return
 
     if spec.get("lockUntil") and not lock_only:
+        # lock_only is only False here if the user explicitly wrote
+        # lockOnly: false — a bare lockUntil already implies lockOnly: true.
         patch.status["phase"] = Phase.FAILED
-        patch.status["message"] = "lockUntil requires lockOnly: true"
+        patch.status["message"] = "lockUntil cannot be combined with lockOnly: false"
         return
 
     try:
@@ -164,6 +166,20 @@ def on_create(spec, name, namespace, status, patch, body):
 # ---------------------------------------------------------------------------
 # HELPERS
 # ---------------------------------------------------------------------------
+
+
+def is_lock_only(spec) -> bool:
+    """Return whether this spec describes a lockOnly job.
+
+    If ``lockOnly`` is set explicitly (true or false), that value wins.
+    If it's absent, it's inferred from the presence of ``lockUntil`` — a
+    bare ``lockUntil`` is enough to imply a timed lock job, so callers
+    don't have to write both fields together.
+    """
+    explicit = spec.get("lockOnly")
+    if explicit is not None:
+        return explicit
+    return bool(spec.get("lockUntil"))
 
 
 def parse_iso_timestamp(raw: str | None, field: str) -> datetime | None:

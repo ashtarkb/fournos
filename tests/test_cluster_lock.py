@@ -27,11 +27,11 @@ def _future(seconds: float) -> str:
     )
 
 
-def test_lock_until_without_lock_only_fails(k8s):
-    """lockUntil set without lockOnly: true is rejected."""
+def test_bare_lock_until_implies_lock_only(k8s):
+    """A bare lockUntil (no lockOnly field at all) implies lockOnly: true."""
     create_job(
         k8s,
-        "test-lockuntil-no-lockonly",
+        "test-lockuntil-implied",
         {
             "cluster": "cluster-2",
             "exclusive": True,
@@ -41,13 +41,40 @@ def test_lock_until_without_lock_only_fails(k8s):
 
     phase = poll_phase(
         k8s,
-        "test-lockuntil-no-lockonly",
+        "test-lockuntil-implied",
+        terminal={Phase.ADMITTED},
+        timeout=30,
+    )
+    assert phase == Phase.ADMITTED, job_status_summary(k8s, "test-lockuntil-implied")
+    assert workload_exists("test-lockuntil-implied"), (
+        "Lock Workload should exist for an implied lockOnly job"
+    )
+
+
+def test_lock_until_with_explicit_lock_only_false_fails(k8s):
+    """lockUntil combined with an explicit lockOnly: false is a contradiction."""
+    create_job(
+        k8s,
+        "test-lockuntil-explicit-false",
+        {
+            "cluster": "cluster-2",
+            "exclusive": True,
+            "lockOnly": False,
+            "lockUntil": _future(3600),
+        },
+    )
+
+    phase = poll_phase(
+        k8s,
+        "test-lockuntil-explicit-false",
         terminal={Phase.FAILED},
         timeout=15,
     )
-    assert phase == Phase.FAILED, job_status_summary(k8s, "test-lockuntil-no-lockonly")
+    assert phase == Phase.FAILED, job_status_summary(
+        k8s, "test-lockuntil-explicit-false"
+    )
 
-    job = get_job(k8s, "test-lockuntil-no-lockonly")
+    job = get_job(k8s, "test-lockuntil-explicit-false")
     assert "lockUntil" in job["status"]["message"]
 
 

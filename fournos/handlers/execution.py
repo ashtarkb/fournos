@@ -16,7 +16,7 @@ from fournos.core.tekton import TektonClient
 from fournos.settings import settings
 from fournos.state import ctx
 
-from .lifecycle import parse_iso_timestamp
+from .lifecycle import is_lock_only, parse_iso_timestamp
 from .status import (
     COND_PIPELINE_RUN_READY,
     COND_WORKLOAD_ADMITTED,
@@ -144,7 +144,7 @@ def _finish_stop(name, conditions, patch, pr_message):
 
 
 def reconcile_admitted(spec, name, namespace, status, patch, body):
-    if spec.get("lockOnly", False):
+    if is_lock_only(spec):
         # lockUntil was already validated in on_create, so a parse failure
         # here shouldn't happen; treat it as "no deadline" rather than crash
         # the reconcile loop.

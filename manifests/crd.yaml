@@ -138,7 +138,6 @@ spec:
                     Kueue hardware scheduling.
                 lockOnly:
                   type: boolean
-                  default: false
                   description: >-
                     Sentinel lock job that holds cluster quota without running
                     a pipeline. Created by the hearth controller to
@@ -146,16 +145,20 @@ spec:
                     exclusive: true and requires 'cluster'. Skips execution
                     engine resolution and PipelineRun creation — the job
                     stays Admitted until deleted, or until lockUntil is
-                    reached if set.
+                    reached if set. If omitted, defaults to true when
+                    lockUntil is set and false otherwise — so a bare
+                    lockUntil is enough to create a timed lock job. Set
+                    explicitly to false to reject a stray lockUntil.
                 lockUntil:
                   type: string
                   format: date-time
                   description: >-
-                    Only used with lockOnly: true. If set, the lock is
-                    released automatically once this UTC timestamp is
-                    reached. ISO 8601 format (e.g. "2026-08-23T18:00:00Z").
-                    When omitted the lock is held indefinitely until the
-                    job is deleted or shut down.
+                    If set, the lock is released automatically once this UTC
+                    timestamp is reached. ISO 8601 format (e.g.
+                    "2026-08-23T18:00:00Z"). Setting this alone (without
+                    lockOnly) implies lockOnly: true. When omitted the lock
+                    is held indefinitely until the job is deleted or shut
+                    down.
                 priority:
                   type: string
                 scheduledStartTime:
