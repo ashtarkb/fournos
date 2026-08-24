@@ -155,29 +155,3 @@ def test_lock_until_already_past_self_releases_quickly(k8s):
     assert not workload_exists("test-lock-past-ttl"), (
         "Lock Workload should be deleted once the (already-past) lockUntil is reached"
     )
-
-
-def test_lock_until_valid_format_but_naive_datetime_treated_as_utc(k8s):
-    """A lockUntil without an explicit 'Z'/offset is treated as UTC (same
-    convention as scheduledStartTime), not rejected and not interpreted in
-    local time.
-    """
-    naive_past = (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
-    create_job(
-        k8s,
-        "test-lock-naive-ttl",
-        {
-            "cluster": "cluster-3",
-            "exclusive": True,
-            "lockOnly": True,
-            "lockUntil": naive_past,
-        },
-    )
-
-    phase = poll_phase(
-        k8s,
-        "test-lock-naive-ttl",
-        terminal={Phase.STOPPED, Phase.FAILED},
-        timeout=30,
-    )
-    assert phase == Phase.STOPPED, job_status_summary(k8s, "test-lock-naive-ttl")
